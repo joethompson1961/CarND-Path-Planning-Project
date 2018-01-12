@@ -299,12 +299,13 @@ int main() {
           	vector<double> next_x_vals;
           	vector<double> next_y_vals;
 
-          	// Define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
           	int path_size = previous_path_x.size();
 
           	double car_s_pred = car_s;
           	if (path_size > 0)
           	    car_s_pred = end_path_s;
+
+          	// Behavior Planning
 
             // Scan sensor fusion data for cars in front of us
             // If car in front, adjust speed/distance to stay behind car
@@ -335,8 +336,8 @@ int main() {
                     // Predict the vehicle's s value out to the end of our path
                     sf_s_pred = sf_s + ((double)path_size*TIME_STEP*sf_v);
 
-                    // If the sensed car is in front of us and it's predicted location is in front of us
-                    // and it's too close to us, then slow down.
+                    // If the sensed car is in front in same lane and it's predicted location is in front
+                    // and close to us, then slow down.
                     if ((sf_s > car_s) && (sf_s_pred > car_s_pred) && ((sf_s_pred - car_s_pred) < FOLLOW_GAP))
                     {
                         following = true;
@@ -448,6 +449,10 @@ int main() {
                 }
             }
 
+            // Trajectory Planning
+
+            // Define a path made up of (x,y) points that the car will visit sequentially every .02 seconds
+
 			// Prepare a spline for generating new points to extend the path
           	tk::spline s;
           	vector<double> anchor_x;
@@ -505,24 +510,26 @@ int main() {
           	// Initialize spline with anchor points
           	s.set_points(anchor_x, anchor_y);
 
-          	// copy the remaining previous trajectory to the new trajectory
+          	// Copy the remaining previous trajectory to the new trajectory
 			for (int i = 0 ; i < path_size ; i++)
 			{
 				next_x_vals.push_back(previous_path_x[i]);
 				next_y_vals.push_back(previous_path_y[i]);
 			}
 
+			// Extend the previous trajectory to the full path size using the spline tool.
 			double dist = distance(ref_x, s(ref_x), ref_x+FOLLOW_GAP, s(ref_x+FOLLOW_GAP));
-          	double x = 0;
-			double y;
 			double x_part = (FOLLOW_GAP / dist);  // ratio of x distance to total distance, i.e. the x portion of the velocity vector.
+            double x = 0;
 			for (int i = path_size ; i < 50 ; i++)
 			{
-				x += (MPH2MPS(ref_vel) * TIME_STEP * x_part);
-				y = s(x);
+				x += (MPH2MPS(ref_vel) * TIME_STEP * x_part);  // Extend x by the distance traveled on x in one timestep.
+				double y = s(x);                               // Use spline tool to generate the corresponding y.
 
+				// convert from car to global coordinates
 				next = local_to_global(ref_x, ref_y, ref_yaw, x, y);
 
+				// add point to end of path
 				next_x_vals.push_back(next[0]);
 				next_y_vals.push_back(next[1]);
 			}

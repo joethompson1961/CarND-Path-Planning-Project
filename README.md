@@ -1,6 +1,41 @@
 # CarND-Path-Planning-Project
 Self-Driving Car Engineer Nanodegree Program
+
+## Reflection
+This project depends on 2 basic elements:  Behavior Planning and Trajectory Planning.
+
+Behavioral planning uses sensor input to make high level decisions about the actions of the car while the trajectory planning derives drivable paths that execute the intentions of the behavioral planning.
+
+#### Behavioral Planning
+The behavioral planning state machine (see main.cpp::308-450) isn't implemented with a formal structured FSM design. This makes the state machine more compact and efficient because of the use of code blocks that are applicable regardless of the state, but it can also makes it harder to understand and follow. If the behavioral state machine needed to be made more complex it would be wise to use a more structured design approach.  But be assured, the behavioral states described here are fully implemented as described.
+
+There are two outputs of the behavioral planner that the trajectory planner depends on:
+* The desired traffic lane to be in.
+* The speed at which to travel.
+ 
+The behavioral planning is implemented with a state machine comprised of 4 states:
+* __Cruising__
+    * The speed of the vehicle is adjusted to go as fast as possible while obeying the speed limit and not violating the limits on maximimum jerk and acceleration. A simple proportional control is used to adjust the rate of accleration based on the difference between current speed and target speed. The greater the difference, the greater the acceleration but never to exceed the maximum jerk limit of the project (see main.cpp::364-368).
+    * The vehicle looks ahead in it's lane for slow cars in front (see cpp.main::322-325).
+    * When a slow car is detected in front of ego-car and in the same lane and it's predicted future position is within the predicted future safe zone 50 meters in front of ego-car it switches to __Following__ state (see main.ccp::339-349).
+* __Following__
+    * The vehicle makes adjustments to speed to match the speed of the vehicle in front and to stay a safe distance behind it. A proportional control is used to adjust the rate of accleration based on the differnce in speed between the vehicles and the gap distance to the car in front (see main.ccp::359-363).
+    * The car searches lanes to the left (see main.ccp::386-410) and right (see main.ccp::412-436) and, when a lane is deemed clear, it sets the new target lane and changes to either __LaneChangeLeft__ or __LaneChangeRight__ state (see main.ccp::438-448). 
+* __LaneChangeLeft__ / __LaneChangeRight__
+    * While changing lanes the vehicle looks ahead for slow cars in front in both the orignal lane and the target lane and adjusts speed to maintain a safe distance from the closest car in front as done in __Following__ (see main.ccp::325-326).
+    * When the vehicle is determined to be completely within the target lane the car switches to __Cruising__ state (see main.ccp::371-380).
    
+#### Trajectory Planning
+The trajectory planner (see main.cpp::452-533) is implemented based mostly on the Arron's walk through implementation with some small variations.
+
+This approach to trajectory planning uses a spline tool (see main.cpp::510:511) to calculate a single path based on the target speed and lane inputs from the behavioral planner.  Working with the behavioral planner it ensures that the derived trajectory satisfies the maximum jerk and maximum acceleration limits of the project.
+
+To produce a new trajectory the planner initializes the spline with the remaining unconsumed waypoints from the previously generated trajectory (see main.cpp::466-490) and then extends the spline to points well ahead of the car and within the lane selected by the behavioral planner (see main.cpp::492-500). This approach ensures smooth transitions from the previous trajectory to the new goals in reponse to changes in behavior state, e.g. switching from following to lane change requires a trajectory that avoids sudden jerks as the vehicle's path is adjusted to switch lanes.
+
+With the spline tool initialize it's then very straight forward to generate x,y points for the new trajectory by calculating future x points based on target velocity and lane and then using the spline tool to produce corresponding y points (see main.cpp::520-535).
+
+This approach for trajectory works well for this project but, for real driving, a single trajectory that aims for the center of the target lane and executes lane changes always using exactly the same style won't always produce the best outcome and may not be flexible enough to handle the numerous corner cases encountered in real driving. An alternative approach that evaluates numerous possible paths and selects the best path based on a cost function is preferred and if I had more time this is how I would implement it.  
+
 ### Simulator.
 You can download the Term3 Simulator which contains the Path Planning Project from the [releases tab (https://github.com/udacity/self-driving-car-sim/releases).
 
