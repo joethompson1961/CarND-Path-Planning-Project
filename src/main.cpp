@@ -183,36 +183,38 @@ vector<double> getXY(double s, double d, const vector<double> &maps_s, const vec
 	return {x,y};
 }
 
-#define MPH2MPS(i) (i * 0.44704)
-#define MPS2MPH(i) (i * 2.24)
+#define MPH2MPS(i) (i * 0.44704F)
+#define MPS2MPH(i) (i * 2.24F)
 #define SF_VX   (3)
 #define SF_VY   (4)
 #define SF_S    (5)
 #define SF_LANE (6)
 
-#define FOLLOW_GAP (50)
-#define TIME_STEP (0.02) // 0.02 seconds (50 Hz)
-#define SPEED_LMT (49.5) // speed limit
+#define FOLLOW_GAP (30.0F)
+#define LANE_CHANGE_PREP_GAP (41.0F)
+#define TIME_STEP (0.02F) // 0.02 seconds (50 Hz)
+#define SPEED_LMT (49.5F) // speed limit
 
 bool have_clearance(double sf_s, double sf_s_pred, double sf_v,
-                    double car_s, double car_s_pred, double car_v)
+                    double car_s, double car_s_pred, double car_v, double clearance_gap)
 {
-    bool clear = true;
-    if ( (sf_s > (car_s - FOLLOW_GAP/3)) && (sf_s < (car_s + FOLLOW_GAP)) ) {
+    bool lane_clear = true;
+    if ( (sf_s > (car_s - clearance_gap/3.0F)) && (sf_s < (car_s + clearance_gap)) ) {
         // The other car is within the protected space next us
-        clear = false;
-//    } else if ((sf_s_pred > (car_s_pred - FOLLOW_GAP/3)) && (sf_s_pred < (car_s_pred + FOLLOW_GAP))) {
+        lane_clear = false;
+//    } else if ((sf_s_pred > (car_s_pred - clearance_gap/3.0F)) && (sf_s_pred < (car_s_pred + clearance_gap))) {
 //        // The other car's predicted location is within the predicted protected space next to us
-//        clear = false;
+//        lane_clear = false;
 //    } else if ( (sf_s > car_s) && (sf_v < car_v) ) {
-//        // The other car is in front but going slower
-//        clear = false;
-//    } else if ( (sf_s < car_s) && (car_s - sf_s < FOLLOW_GAP)
-//            && (sf_v > car_v + 5) )  {
-//        // The other car is behind protected space but close and approaching fast
-//        clear = false;
+//        // The other car is in front of protected space but going slower
+//        lane_clear = false;
+    } else if ( (sf_s < (car_s - clearance_gap/3.0F)) && (sf_s > (car_s - clearance_gap/3.0F - 5))
+            && (sf_v > (car_v + 10)) )  {
+        // The other car is behind but close and approaching fast
+        lane_clear = false;
+        cout << "Approaching fast from BEHIND." << endl;
     }
-    return clear;
+    return lane_clear;
 }
 
 int main() {
@@ -256,8 +258,9 @@ int main() {
   int prev_lane = 1;
   double ref_vel = 0.0;
   bool lane_change_in_progress = false;
+  bool prepare_lane_change = false;
 
-  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&lane,&prev_lane,&ref_vel,&lane_change_in_progress]
+  h.onMessage([&map_waypoints_x,&map_waypoints_y,&map_waypoints_s,&map_waypoints_dx,&map_waypoints_dy,&lane,&prev_lane,&ref_vel,&prepare_lane_change,&lane_change_in_progress]
                (uWS::WebSocket<uWS::SERVER> ws, char *data, size_t length, uWS::OpCode opCode) {
     // "42" at the start of the message means there's a websocket message event.
     // The 4 signifies a websocket message
@@ -322,8 +325,8 @@ int main() {
                 float sf_d = sensor_fusion[i][SF_LANE];
                 // Normally this checks for car in front of our current lane.
                 // During lane changes it checks the target lane and the previous lane.
-                if ( (sf_d < (2 + 4*lane + 2) && sf_d > (2 + 4*lane - 2))
-                    || (sf_d < (2 + 4*prev_lane + 2) && sf_d > (2 + 4*prev_lane - 2)) )
+                if ( (sf_d < float(4*lane + 4) && sf_d > float(4*lane))
+                    || (sf_d < float(4*prev_lane + 4) && sf_d > float(4*prev_lane)) )
                 {
                     // A car is in our lane
                     sf_vx = sensor_fusion[i][SF_VX];
@@ -333,12 +336,16 @@ int main() {
                     sf_v = sqrt(sf_vx*sf_vx + sf_vy*sf_vy);
                     sf_s = sensor_fusion[i][SF_S];
 
-                    // Predict the vehicle's s value out to the end of our path
+                    // Predict the vehicle's s-value out to the end of our path
                     sf_s_pred = sf_s + ((double)path_size*TIME_STEP*sf_v);
 
-                    // If the sensed car is in front in same lane and it's predicted location is in front
-                    // and close to us, then slow down.
-                    if ((sf_s > car_s) && (sf_s_pred > car_s_pred) && ((sf_s_pred - car_s_pred) < FOLLOW_GAP))
+                    // If the sensed car is in front in same lane and we're approaching it, then attempt
+                    // to change lanes before we get too close and are forced to slow down.
+                    if ((sf_s > car_s) && ((sf_s - car_s) < LANE_CHANGE_PREP_GAP) && !lane_change_in_progress)
+                        prepare_lane_change = true;
+
+                    // If the sensed car is in front in same lane and we're close then switch to following mode.
+                    if ((sf_s > car_s) && ((sf_s - car_s) < FOLLOW_GAP))
                     {
                         following = true;
                         if ((sf_s - car_s) < gap)
@@ -357,31 +364,60 @@ int main() {
             // If not following then follow the speed limit.
             // To reach target velocity smoothly, adjustments to velocity are proportional to the needed acceleration.
             if (following) {
-                if (ref_vel > tracking_speed)
-                    ref_vel -= (0.333 * (1 - gap/FOLLOW_GAP));
+                if ( (ref_vel > tracking_speed) || (gap < (FOLLOW_GAP/4.0)) )
+                    ref_vel -= (0.35 * (1 - gap/FOLLOW_GAP));
                 else
-                    ref_vel += (0.224 * gap/FOLLOW_GAP);
+                    ref_vel += (0.25 * gap/FOLLOW_GAP);
             } else if (ref_vel > tracking_speed) {
-                ref_vel -= (0.224 * (1 - tracking_speed/ref_vel));
+                ref_vel -= (0.3 * (1 - tracking_speed/ref_vel));
             } else if (ref_vel < tracking_speed) {
-                ref_vel += (0.224 * (1 - ref_vel/tracking_speed));  // increase speed without exceeding max acceleration
+                ref_vel += (0.3 * (1 - ref_vel/tracking_speed));  // increase speed without exceeding max acceleration
             }
 
             // Manage Lane Changes
             // If a lane change is already in progress don't consider change until it completes.
             if (lane_change_in_progress)
             {
-                if ( (car_d > (4.0*(float)lane+1.5)) && ((car_d < (4*(float)lane+2.5))) )
+                if ( (car_d > (4.0*(float)lane+0.9)) && ((car_d < (4*(float)lane+3.1))) )
                 {
                     lane_change_in_progress = false;
                     prev_lane = lane;
-//                    cout << endl << "Change to lane " << lane << " complete." << endl;
+                    cout << "Change to lane " << lane << " complete." << endl;
+                }
+                else
+                {
+                    // during lane change make sure target lane stays clear
+                    for (int i = 0; i < sensor_fusion.size(); i++)
+                    {
+                        float sf_d = sensor_fusion[i][SF_LANE];
+                        if ((sf_d > (4*(lane))) && (sf_d < (4*(lane)+4)))
+                        {
+                            // A car is sensed in target lane
+                            sf_vx = sensor_fusion[i][SF_VX];
+                            sf_vx = MPS2MPH(sf_vx);
+                            sf_vy = sensor_fusion[i][SF_VY];
+                            sf_vy = MPS2MPH(sf_vy);
+                            sf_v = sqrt(sf_vx*sf_vx + sf_vy*sf_vy);
+                            sf_s = sensor_fusion[i][SF_S];
+
+                            // Predict the vehicle's s-value out to the end of our path
+                            sf_s_pred = sf_s + ((double)path_size*TIME_STEP*sf_v);
+
+                            // check for clearance
+                            if (!have_clearance(sf_s, sf_s_pred, sf_v, car_s, car_s_pred, tracking_speed, FOLLOW_GAP))
+                            {
+                                // abort lane change if suddenly something appears in the target lane.
+                                lane = prev_lane;
+                                cout << "Lane change ABORT." << endl;
+                            }
+                        }
+                    }
                 }
             }
             else
             {
-                // If following a car then figure out if we can pass
-                if (following)
+                // If approaching a slow car then figure out if we can pass
+                if (prepare_lane_change)
                 {
                     bool change_lane_left = false;
                     if (lane > 0)   // if there's a lane to the left
@@ -400,12 +436,15 @@ int main() {
                                 sf_v = sqrt(sf_vx*sf_vx + sf_vy*sf_vy);
                                 sf_s = sensor_fusion[i][SF_S];
 
-                                // Predict the vehicle's s value out to the end of our path
+                                // Predict the vehicle's s-value out to the end of our path
                                 sf_s_pred = sf_s + ((double)path_size*TIME_STEP*sf_v);
 
-                                // Clear the flag if prediction that it's unsafe to change lanes.
-                                change_lane_left &= have_clearance(sf_s, sf_s_pred, sf_v, car_s, car_s_pred, tracking_speed);
+                                // Clear flag if it's unsafe to change lanes.
+                                if (!have_clearance(sf_s, sf_s_pred, sf_v, car_s, car_s_pred, tracking_speed, LANE_CHANGE_PREP_GAP))
+                                    change_lane_left = false;
                             }
+                            if (!change_lane_left)
+                                break;  // don't waste time with more processing
                         }
                     }
 
@@ -426,12 +465,15 @@ int main() {
                                 sf_v = sqrt(sf_vx*sf_vx + sf_vy*sf_vy);
                                 sf_s = sensor_fusion[i][SF_S];
 
-                                // Predict the vehicle's s value out to the end of our path
+                                // Predict the vehicle's s-value out to the end of our path
                                 sf_s_pred = sf_s + ((double)path_size*TIME_STEP*sf_v);
 
-                                // Clear the flag if prediction that it's unsafe to change lanes.
-                                change_lane_right &= have_clearance(sf_s, sf_s_pred, sf_v, car_s, car_s_pred, tracking_speed);
+                                // Clear flag if it's unsafe to change lanes right
+                                if (!have_clearance(sf_s, sf_s_pred, sf_v, car_s, car_s_pred, tracking_speed, LANE_CHANGE_PREP_GAP))
+                                    change_lane_right = false;
                             }
+                            if (!change_lane_right)
+                                break;  // don't waste time with more processing
                         }
                     }
 
@@ -439,12 +481,14 @@ int main() {
                         prev_lane = lane;
                         lane -= 1;
                         lane_change_in_progress = true;
-//                        cout << "Lane change left in progress." << endl;
+                        prepare_lane_change = false;
+                        cout << "Lane change left in progress." << endl;
                     } else if (change_lane_right) {
                         prev_lane = lane;
                         lane += 1;
                         lane_change_in_progress = true;
-//                        cout << "Lane change right in progress." << endl;
+                        prepare_lane_change = false;
+                        cout << "Lane change right in progress." << endl;
                     }
                 }
             }
@@ -489,12 +533,14 @@ int main() {
           	anchor_x.push_back(ref_x);
           	anchor_y.push_back(ref_y);
 
+#define EXTEND_X 48
+
           	// Extend spline anchor points with a few points that are based on but well ahead of the current pose.
           	double d =  2.0 + lane * 4.0;
           	vector<double> next;
           	for (int i=1 ; i<=3 ; i++)
           	{
-          		next = getXY(car_s + i*(FOLLOW_GAP), d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
+          		next = getXY(car_s + i*EXTEND_X, d, map_waypoints_s, map_waypoints_x, map_waypoints_y);
               	anchor_x.push_back(next[0]);
               	anchor_y.push_back(next[1]);
           	}
@@ -518,8 +564,8 @@ int main() {
 			}
 
 			// Extend the previous trajectory to the full path size using the spline tool.
-			double dist = distance(ref_x, s(ref_x), ref_x+FOLLOW_GAP, s(ref_x+FOLLOW_GAP));
-			double x_part = (FOLLOW_GAP / dist);  // ratio of x distance to total distance, i.e. the x portion of the velocity vector.
+			double dist = distance(ref_x, s(ref_x), ref_x+EXTEND_X, s(ref_x+EXTEND_X));
+			double x_part = (EXTEND_X / dist);  // ratio of x distance to total distance, i.e. the x portion of the velocity vector.
             double x = 0;
 			for (int i = path_size ; i < 50 ; i++)
 			{
